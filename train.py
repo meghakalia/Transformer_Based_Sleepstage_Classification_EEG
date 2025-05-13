@@ -8,11 +8,14 @@ import numpy as np
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 
+from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
 
 import os
 import matplotlib.pyplot as plt
 from sklearn.utils.multiclass import unique_labels
+
+from CNNBaseline import CNNBaseline
 
 from dotenv import load_dotenv
 load_dotenv()  # This works
@@ -27,8 +30,8 @@ device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if 
 # === 0. Init wandb ===
 wandb.init(project="sleep-stage-transformer", name="all_patients-transformer", config={
     "epochs": 25,
-    "batch_size": 32,
-    "lr": 1e-4,
+    "batch_size": 16,
+    "lr": 1e-3,
     "model": "TransformerEncoder",
 })
 
@@ -44,7 +47,14 @@ print("Total elements:", X.size)
 # Load and clean features/labels
 X = df.iloc[:, :-1].values  # All but last column is signal
 X = X[:, :300]              # Retain only first 300 EEG values
-X = X.reshape(-1, 10, 30)   # For transformer: (samples, seq_len, features)
+
+# normalize
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)  # shape: (n_samples, 300)
+
+# Step 3: Reshape for Transformer
+X = X_scaled.reshape(-1, 10, 30)
+
 
 y = df.iloc[:, -1].values   # Last column = label
 
@@ -88,29 +98,14 @@ val_loader = DataLoader(val_ds, batch_size=wandb.config.batch_size)
 test_loader = DataLoader(test_ds, batch_size=wandb.config.batch_size)
 
 # === 3. Transformer Model ===
-class SleepTransformer(nn.Module):
-    def __init__(self, input_dim=30, d_model=128, num_classes=5):
-        super().__init__()
-        self.embed = nn.Linear(input_dim, d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=4, dim_feedforward=512)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=4)
-        self.cls = nn.Linear(d_model, num_classes)
-
-    def forward(self, x):
-        x = self.embed(x)  # (B, seq_len, d_model)
-        x = x.permute(1, 0, 2)  # (seq_len, B, d_model)
-        out = self.transformer(x)
-        out = out.mean(dim=0)
-        return self.cls(out)
-
-
-model = SleepTransformer(num_classes=len(np.unique(y))).to(device)
+model = CNNBaseline(num_classes=len(np.unique(y))).to(device)
+# model = SleepTransformer(num_classes=len(np.unique(y))).to(device)
 
 # === 4. Train ===
 
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 optimizer = torch.optim.Adam(model.parameters(), lr=wandb.config.lr)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.9)
 
 best_val_acc = 0 
 for epoch in range(wandb.config.epochs):
@@ -126,8 +121,8 @@ for epoch in range(wandb.config.epochs):
         
         total_loss += loss.item()
 
-        probs = torch.softmax(preds, dim=1)
-        print(probs[0]) # print confidence
+        # probs = torch.softmax(preds, dim=1)
+        # print(probs[0]) # print confidence
 
         _, pred_labels = torch.max(preds, 1)
         correct += (pred_labels == yb).sum().item()
