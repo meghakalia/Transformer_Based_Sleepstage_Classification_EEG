@@ -7,6 +7,7 @@ import wandb
 import numpy as np
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
+from sleepTransformer import SleepTransformer
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
@@ -17,6 +18,8 @@ from sklearn.utils.multiclass import unique_labels
 
 from CNNBaseline import CNNBaseline
 
+from focal_loss import FocalLoss
+
 from dotenv import load_dotenv
 load_dotenv()  # This works
 
@@ -26,18 +29,26 @@ wandb.login(key=WANDB_API_KEY)
 save_model = "/Volumes/FF952/SleepStageClassification/transformer/12_05_2025/model"
 
 device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+model_type = "cnn"
+focal_loss_use = True
 
 # === 0. Init wandb ===
-wandb.init(project="sleep-stage-transformer", name="all_patients-transformer", config={
-    "epochs": 25,
-    "batch_size": 16,
-    "lr": 1e-3,
-    "model": "TransformerEncoder",
-})
+wandb.init(
+    project="sleep-stage-transformer",
+    name=f"{model_type}-all_patients",
+    config={
+        "epochs": 100,
+        "batch_size": 8,
+        "lr": 1e-3,
+        "model": model_type,
+        "loss": f"FL-{focal_loss_use}"
+    }
+)
+
 
 # === 1. Load patient1 data ===
+# df = pd.read_csv("sleep_all_patients.csv")
 df = pd.read_csv("sleep_all_patients.csv")
-
 # Infer input shape and reshape
 X = df.drop(columns=["stage"]).values
 print("Original X shape:", X.shape)
@@ -52,8 +63,10 @@ X = X[:, :300]              # Retain only first 300 EEG values
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)  # shape: (n_samples, 300)
 
-# Step 3: Reshape for Transformer
-X = X_scaled.reshape(-1, 10, 30)
+if model_type == "cnn":
+    X = X_scaled[:, np.newaxis, :]  # (B, 1, 300)
+else:
+    X = X_scaled.reshape(-1, 10, 30)  # (B, 10, 30) # for transformer
 
 
 y = df.iloc[:, -1].values   # Last column = label
@@ -79,6 +92,7 @@ X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=0.2,
 # Compute weights
 class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(y_train), y=y_train)
 class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
+focal_loss = FocalLoss(gamma=3.0, alpha=class_weights, reduction='mean')
 
 # === 2. Dataset Class ===
 class SleepDataset(Dataset):
@@ -98,12 +112,22 @@ val_loader = DataLoader(val_ds, batch_size=wandb.config.batch_size)
 test_loader = DataLoader(test_ds, batch_size=wandb.config.batch_size)
 
 # === 3. Transformer Model ===
-model = CNNBaseline(num_classes=len(np.unique(y))).to(device)
-# model = SleepTransformer(num_classes=len(np.unique(y))).to(device)
+if model_type == "cnn":
+    model = CNNBaseline(num_classes=len(np.unique(y))).to(device)
+else:
+    model = SleepTransformer(input_dim=30, num_classes=len(np.unique(y))).to(device)
+
+# model = CNNBaseline(num_classes=len(np.unique(y))).to(device)
+# # model = SleepTransformer(num_classes=len(np.unique(y))).to(device)
 
 # === 4. Train ===
 
-criterion = nn.CrossEntropyLoss(weight=class_weights)
+if focal_loss_use:
+    criterion = focal_loss
+else:
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+
 optimizer = torch.optim.Adam(model.parameters(), lr=wandb.config.lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.9)
 
