@@ -8,6 +8,8 @@ import numpy as np
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 
+from sklearn.utils.class_weight import compute_class_weight
+
 import os
 import matplotlib.pyplot as plt
 from sklearn.utils.multiclass import unique_labels
@@ -20,6 +22,7 @@ wandb.login(key=WANDB_API_KEY)
 
 save_model = "/Volumes/FF952/SleepStageClassification/transformer/12_05_2025/model"
 
+device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
 
 # === 0. Init wandb ===
 wandb.init(project="sleep-stage-transformer", name="all_patients-transformer", config={
@@ -59,8 +62,13 @@ torch.manual_seed(seed)
 # Split into train+val and test
 X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=0.2, random_state=seed, stratify=y)
 
+
 # Split train+val into train and val
 X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=0.2, random_state=seed, stratify=y_temp)
+
+# Compute weights
+class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(y_train), y=y_train)
+class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
 
 # === 2. Dataset Class ===
 class SleepDataset(Dataset):
@@ -81,11 +89,11 @@ test_loader = DataLoader(test_ds, batch_size=wandb.config.batch_size)
 
 # === 3. Transformer Model ===
 class SleepTransformer(nn.Module):
-    def __init__(self, input_dim=30, d_model=64, num_classes=5):
+    def __init__(self, input_dim=30, d_model=128, num_classes=5):
         super().__init__()
         self.embed = nn.Linear(input_dim, d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=4, dim_feedforward=128)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=4, dim_feedforward=512)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=4)
         self.cls = nn.Linear(d_model, num_classes)
 
     def forward(self, x):
@@ -95,12 +103,14 @@ class SleepTransformer(nn.Module):
         out = out.mean(dim=0)
         return self.cls(out)
 
-device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+
 model = SleepTransformer(num_classes=len(np.unique(y))).to(device)
 
 # === 4. Train ===
-criterion = nn.CrossEntropyLoss()
+
+criterion = nn.CrossEntropyLoss(weight=class_weights)
 optimizer = torch.optim.Adam(model.parameters(), lr=wandb.config.lr)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
 best_val_acc = 0 
 for epoch in range(wandb.config.epochs):
@@ -113,13 +123,18 @@ for epoch in range(wandb.config.epochs):
         loss = criterion(preds, yb)
         loss.backward()
         optimizer.step()
+        
         total_loss += loss.item()
+
+        probs = torch.softmax(preds, dim=1)
+        print(probs[0]) # print confidence
 
         _, pred_labels = torch.max(preds, 1)
         correct += (pred_labels == yb).sum().item()
         total += yb.size(0)
 
     acc = correct / total
+    scheduler.step()
 
     # Validation
     model.eval()
