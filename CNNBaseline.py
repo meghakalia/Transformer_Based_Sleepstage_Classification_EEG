@@ -15,11 +15,11 @@ class CNNBaseline(nn.Module):
 
             nn.Conv1d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm1d(128),
-            nn.ReLU()
+            nn.ReLU(),
 
             nn.AdaptiveAvgPool1d(1)
         )
-        self.classifier = nn.Linear(64, num_classes)
+        self.classifier = nn.Linear(128, num_classes)
 
     def forward(self, x):  # x: (B, 1, 300)
         out = self.conv(x)
